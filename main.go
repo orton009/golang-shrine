@@ -6,19 +6,37 @@ import (
 	"github.com/orton009/shrine/p2p"
 )
 
-func main() {
+func startServer(addr string) {
+
+	log.Println("Starting server on: ", addr)
+
 	tcpOpts := p2p.TCPTransportOptions{
-		ListenAddr:    ":3000",
+		ListenAddr:    ":" + addr,
 		HandshakeFunc: p2p.NOPHandshakeFunc,
 		Decoder:       &p2p.DefaultDecoder{},
 	}
 
 	tr := p2p.NewTCPTransport(tcpOpts)
 
-	if err := tr.ListenAndAccept(); err != nil {
+	storage := p2p.NewStorage(p2p.StorageOpts{
+		PathTransformFunc: p2p.DefaultPathTransformFunc,
+		Root:              addr + "_root",
+	})
+
+	fs := NewFileServer(tr, storage)
+
+	if err := fs.Start(); err != nil {
 		log.Fatal(err)
 	}
 
-	select {}
+}
+
+func main() {
+
+	startServer("3001")
+
+	for {
+
+	}
 
 }
