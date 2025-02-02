@@ -1,64 +1,88 @@
 package p2p
 
 import (
-	"errors"
 	"fmt"
+	"log"
 	"net"
+	"sync"
 )
 
 type TCPPeer struct {
-
-	// underlying connection of the peer
-	conn net.Conn
+	net.Conn
 
 	// if we dial and retrieve a connection, true
 	// if we accept and retrieve a connection, false
 	outbound bool
+	wg       *sync.WaitGroup
 }
 
 func NewTCPPeer(conn net.Conn, outbound bool) *TCPPeer {
 	return &TCPPeer{
-		conn:     conn,
+		Conn:     conn,
 		outbound: outbound,
+		wg:       &sync.WaitGroup{},
 	}
+}
+
+func (p *TCPPeer) CloseStream() {
+	p.wg.Done()
+}
+
+func (p *TCPPeer) Send(b []byte) error {
+	_, err := p.Conn.Write(b)
+	return err
 }
 
 type TCPTransportOptions struct {
 	ListenAddr    string
 	HandshakeFunc HandshakeFunc
 	Decoder       Decoder
-	OnPeer        func(Peer) error
+	OnPeer        func(*TCPPeer) error
 }
 
 type TCPTransport struct {
-	options  TCPTransportOptions
+	TCPTransportOptions
 	listener net.Listener
 
-	peers map[net.Addr]Peer
+	rpcch chan RPC
 }
 
 func NewTCPTransport(opts TCPTransportOptions) *TCPTransport {
 	return &TCPTransport{
-		options: opts,
+		TCPTransportOptions: opts,
+		rpcch:               make(chan RPC, 1024),
 	}
 }
 
-// func (t *TCPTransport) OnPeer(peer Peer) error {
-
-// }
-
-func (t *TCPTransport) Close() error {
-	if err := t.listener.Close(); err != nil {
+func (t *TCPTransport) Dial(addr string) error {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
 		return err
 	}
 
+	go t.handleConn(conn, true)
 	return nil
+}
+
+func (t *TCPTransport) Addr() string {
+	return t.ListenAddr
+}
+
+// returns readonly channel for reading the incoming messages from another peer
+func (t *TCPTransport) Consume() <-chan RPC {
+	return t.rpcch
+}
+
+func (t *TCPTransport) Close() error {
+	return t.listener.Close()
 }
 
 func (t *TCPTransport) ListenAndAccept() error {
 	var err error
 
-	t.listener, err = net.Listen("tcp", t.options.ListenAddr)
+	t.listener, err = net.Listen("tcp", t.ListenAddr)
+
+	fmt.Println("started tcp listener on port ", t.listener.Addr().String())
 
 	if err != nil {
 		return err
@@ -77,42 +101,53 @@ func (t *TCPTransport) startAcceptLoop() error {
 			fmt.Printf("TCP accept error: %v", err)
 		}
 
-		if errors.Is(err, net.ErrClosed) {
-			return nil
-		}
-
-		go t.handleConn(conn)
+		go t.handleConn(conn, false)
 	}
 }
 
-func (t *TCPTransport) handleConn(conn net.Conn) {
-	peer := NewTCPPeer(conn, false)
+func (t *TCPTransport) handleConn(conn net.Conn, outbound bool) {
 
-	if err := t.options.HandshakeFunc(peer); err != nil {
+	var err error
+
+	defer func() {
+		log.Printf("dropping peer connection: %s", err.Error())
 		conn.Close()
-		fmt.Printf("TCP handshake error: %v", err)
+	}()
+
+	peer := NewTCPPeer(conn, outbound)
+
+	if err = t.HandshakeFunc(peer); err != nil {
 		return
 	}
 
-	if t.options.OnPeer != nil {
-		if err := t.options.OnPeer(peer); err != nil {
-			conn.Close()
-			fmt.Printf("TCP on peer error: %v", err)
+	if t.OnPeer != nil {
+		if err = t.OnPeer(peer); err != nil {
 			return
 		}
 	}
 
-	// Read loop
-	msg := Message{}
 	for {
-		if err := t.options.Decoder.Decode(conn, &msg); err != nil {
-			fmt.Printf("TCP message decode error: %v", err)
-			conn.Close()
+		rpc := RPC{}
+		if err = t.Decoder.Decode(conn, &rpc); err != nil {
 			return
 		}
 
-		msg.From = conn.RemoteAddr()
-		fmt.Printf("message: %v", msg)
+		rpc.From = conn.RemoteAddr()
+
+		// allow implementations to read the stream data and close once read
+		// if current rpc message is a stream then next data will be streaming data
+
+		if rpc.Stream {
+			peer.wg.Add(1)
+			fmt.Printf("[%s] incoming stream, waiting....\n", conn.RemoteAddr())
+			peer.wg.Wait()
+			fmt.Printf("[%s] stream closed, resuming read loop\n", conn.RemoteAddr())
+			continue
+		}
+
+		// if rpc is not a stream, ingest this rpc to transport channel
+
+		t.rpcch <- rpc
 
 	}
 

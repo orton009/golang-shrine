@@ -38,26 +38,27 @@ func NewStorage(opts StorageOpts) Storage {
 	}
 }
 
-func (s *Storage) writeStream(path string, r io.Reader) error {
+func (s *Storage) writeStream(path string, r io.Reader) (int64, error) {
+	var size int64
 
 	if err := os.Mkdir(s.Root, os.ModePerm); !errors.Is(err, os.ErrExist) {
-		return err
+		return size, err
 	}
 
 	file, err := os.Create(path)
 	if err != nil {
-		return err
+		return size, err
 	}
 	defer file.Close()
 
-	n, err := io.Copy(file, r)
+	size, err = io.Copy(file, r)
 	if err != nil {
-		return err
+		return size, err
 	}
 
-	log.Printf("written %d bytes to dist", n)
+	log.Printf("written %d bytes to disk", size)
 
-	return nil
+	return size, nil
 }
 
 func (s *Storage) readStream(path string) (io.Reader, error) {
@@ -87,16 +88,16 @@ func (s *Storage) Read(key string) (io.Reader, error) {
 	return r, nil
 }
 
-func (s *Storage) Write(key string, r io.Reader) error {
+func (s *Storage) Write(key string, r io.Reader) (int64, error) {
 
 	fullPath := s.FullPath(key)
 
-	err := s.writeStream(fullPath, r)
+	size, err := s.writeStream(fullPath, r)
 
 	if err != nil {
-		return err
+		return size, err
 	}
-	return nil
+	return size, nil
 }
 
 func (s *Storage) Delete(key string) error {
